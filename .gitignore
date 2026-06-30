@@ -1,1 +1,25 @@
+# macOS
 .DS_Store
+
+# Node
+node_modules
+dist
+dist-ssr
+*.local
+
+# Rust build output (large — never commit)
+src-tauri/target/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea
