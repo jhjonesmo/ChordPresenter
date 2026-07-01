@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 create_pro_song.py — ProPresenter .pro song file creator
-CCOB Outdoor standard: TungstenNarrow-Bold font, white text,
-black background from theme.
+DoubleThickTheme standard: TungstenNarrow-Bold font, white text,
+two thick black lines from theme.
 
 Usage:
     python3 create_pro_song.py
@@ -16,12 +16,9 @@ Lyrics format per section:
       ("Line 1", "Line 2")   → two-line slide with explicit hard line break
                                 (use for short paired phrases like "Oh hallelujah / I'm clean")
 
-    Keep individual lines to roughly 25 chars or fewer for the Outdoor text box.
+    Keep individual lines to roughly 25 chars or fewer for the DoubleThickTheme text box.
     Lines longer than ~28 chars will auto-wrap in ProPresenter — split them
     into a tuple with a natural breath break instead.
-
-Template source: Washed - Elevation Worship2ndedit.pro (CCOB Outdoor format,
-confirmed working in ProPresenter).
 """
 
 from __future__ import annotations
@@ -98,12 +95,12 @@ def build_rtf(line1, line2=None):
     return (RTF_HEADER + text + '}').encode('latin-1')
 
 # ────────────────────────────────────────────────────────────────
-# SLIDE BUILDER  (binary template from Washed 2ndedit.pro — CCOB Outdoor format,
+# SLIDE BUILDER  (binary template — DoubleThickTheme format,
 #                 confirmed working in ProPresenter)
 # ────────────────────────────────────────────────────────────────
 
 # Source UUIDs present in the template (each appears exactly once; all replaced per slide)
-# Template slide: "oh hallelujah" from Washed - Elevation Worship2ndedit.pro (slide 14)
+# Template slide: "oh hallelujah" from Example Song2ndedit.pro (slide 14)
 TMPL_SLIDE_UUID  = b'546EA798-D078-41FF-8774-D30592A1E681'  # slide UUID  [4:40]
 TMPL_ELEM_UUID1  = b'4266A8FE-54E5-483C-85E1-91E8331F5AD9'  # elem UUID1  [51:87]
 TMPL_UUID_MID    = b'1820E643-4883-44BA-9F11-F3BFACACDEC4'  # mid UUID    [111:147]
@@ -138,8 +135,8 @@ _ATTR_LEN_END = 468   # end of that varint
 _ATTR_END     = 650   # end of Attributes content (= 468 + 182)
 
 # --- Template slide bytes (embedded — no external file dependency) ---
-# Extracted from: Washed - Elevation Worship2ndedit.pro, slide 14 ("oh hallelujah")
-# CCOB Outdoor format: TungstenNarrow-Bold, fs502, slleading862, Outdoor position data
+# Extracted from: Example Song2ndedit.pro, slide 14 ("oh hallelujah")
+# DoubleThickTheme format: TungstenNarrow-Bold, fs502, slleading862, Outdoor position data
 _TEMPLATE_HEX = (
     '0a260a2435343645413739382d443037382d343146462d383737342d44333035393241314536'
     '383128014200528b090a260a2434323636413846452d353445352d343833432d383545312d39'
@@ -314,7 +311,7 @@ def build_arrangement(arr_uuid, arr_name, group_uuids):
 
 # ProPresenter file version/platform header (field 1)
 FILE_META_HEX      = '08011206081a100518011801220f081510032209333532353138313738'
-# Audio settings (field 8) — matches working CCOB songs
+# Audio settings (field 8)
 AUDIO_SETTINGS_HEX = '0a001801'
 # Presentation flag (field 9)
 FLAG9_HEX          = '1801'
@@ -341,7 +338,7 @@ def lines_to_slides(lines):
     return slides
 
 
-def build_pro_file(title, sections, arrangement_name="CCOB-Outdoor", chord_data=None):
+def build_pro_file(title, sections, arrangement_name="DoubleThickTheme", chord_data=None):
     """
     Build the complete binary content of a .pro file.
 
@@ -413,13 +410,13 @@ def build_pro_file(title, sections, arrangement_name="CCOB-Outdoor", chord_data=
 #   ("Line 1", "Line 2")     — two lines with a hard break between them
 #                               Use for short paired phrases that belong together.
 #
-# CCOB Outdoor guideline: keep each line under ~28 characters.
+# DoubleThickTheme guideline: keep each line under ~28 characters.
 # Longer lines will auto-wrap in ProPresenter at an uncontrolled point.
 # If a line is long, split it into a tuple at the natural breath/phrase break.
 #
 # ────────────────────────────────────────────────────────────────
 
-SONG_TITLE = "Washed - Elevation Worship"
+SONG_TITLE = "Example Song"
 
 SONG_SECTIONS = [
     ("Chorus", [

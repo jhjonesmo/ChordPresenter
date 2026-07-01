@@ -19,7 +19,7 @@ Input format (EssentialWorship / Obsidian Clipper):
 Sections like INTRO, OUTRO, INSTRUMENTAL, TURN are skipped (no lyrics).
 Sections with no lyric lines (e.g. [CHORUS 1] [x2] repeat markers) are also skipped.
 
-Template source: Washed - Elevation Worship2ndedit.pro (CCOB Outdoor format).
+Theme: DoubleThickTheme (TungstenNarrow-Bold, white text, two thick black lines).
 """
 
 from __future__ import annotations
@@ -631,7 +631,7 @@ def build_song_pro(title: str, artist: str, sections, chord_map,
             chord_dicts = [chords for _, chords in lyric_chord_pairs]
             chord_data.append((sec_name, chord_dicts))
 
-    return build_pro_file(title, all_sections, arrangement_name="CCOB-Outdoor",
+    return build_pro_file(title, all_sections, arrangement_name="DoubleThickTheme",
                           chord_data=chord_data)
 
 
