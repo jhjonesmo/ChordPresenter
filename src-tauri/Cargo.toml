@@ -1,6 +1,6 @@
 [package]
 name = "chordpresenter"
-version = "1.0.0"
+version = "1.1.0"
 description = "Converts chord charts to ProPresenter .pro files for worship services"
 authors = ["CCOB"]
 edition = "2021"
