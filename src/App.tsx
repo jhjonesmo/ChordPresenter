@@ -3,103 +3,20 @@ import { invoke } from "@tauri-apps/api/tauri";
 import { open } from "@tauri-apps/api/dialog";
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
+import {
+  MAJOR_KEYS, MINOR_KEYS, analyzeKey, prefersFlats,
+  semitonesBetween, shiftKey, toConcert, transposeChart,
+} from "./music";
+import { buildPrintHtml } from "./print";
 
-// ── Key detection (mirrors Python _detect_key logic) ────────────────────────
-const CHORD_TOKEN = /^[A-G][#b]?(m(?!aj|in)|maj|min|dim|aug|°|ø)?(7|9|11|13|6|5|4|2)?(sus[24]?|add[29]?)?(\/?[A-G][#b]?)?$/;
-
-const ENH: Record<string, string> = {
-  'C#':'Db','Db':'C#','D#':'Eb','Eb':'D#',
-  'F#':'Gb','Gb':'F#','G#':'Ab','Ab':'G#','A#':'Bb','Bb':'A#',
-};
-
-// Full 24-key diatonic chord sets using normalised chord names.
-// Minor keys include both natural v and harmonic V (worship songs use either).
-// Diminished (vii°) omitted — rare in contemporary worship charts.
-const DIATONIC_CHORDS: Record<string, Set<string>> = {
-  // Major keys
-  C:   new Set(['C','Dm','Em','F','G','Am']),
-  G:   new Set(['G','Am','Bm','C','D','Em']),
-  D:   new Set(['D','Em','F#m','G','A','Bm']),
-  A:   new Set(['A','Bm','C#m','D','E','F#m']),
-  E:   new Set(['E','F#m','G#m','A','B','C#m']),
-  B:   new Set(['B','C#m','D#m','E','F#','G#m']),
-  'F#':new Set(['F#','G#m','A#m','B','C#','D#m']),
-  F:   new Set(['F','Gm','Am','Bb','C','Dm']),
-  Bb:  new Set(['Bb','Cm','Dm','Eb','F','Gm']),
-  Eb:  new Set(['Eb','Fm','Gm','Ab','Bb','Cm']),
-  Ab:  new Set(['Ab','Bbm','Cm','Db','Eb','Fm']),
-  Db:  new Set(['Db','Ebm','Fm','Gb','Ab','Bbm']),
-  // Minor keys
-  Am:  new Set(['Am','C','Dm','Em','E','F','G']),
-  Em:  new Set(['Em','G','Am','Bm','B','C','D']),
-  Bm:  new Set(['Bm','D','Em','F#m','F#','G','A']),
-  'F#m':new Set(['F#m','A','Bm','C#m','C#','D','E']),
-  'C#m':new Set(['C#m','E','F#m','G#m','G#','A','B']),
-  'G#m':new Set(['G#m','B','C#m','D#m','D#','E','F#']),
-  Dm:  new Set(['Dm','F','Gm','Am','A','Bb','C']),
-  Gm:  new Set(['Gm','Bb','Cm','Dm','D','Eb','F']),
-  Cm:  new Set(['Cm','Eb','Fm','Gm','G','Ab','Bb']),
-  Fm:  new Set(['Fm','Ab','Bbm','Cm','C','Db','Eb']),
-  Bbm: new Set(['Bbm','Db','Ebm','Fm','F','Gb','Ab']),
-};
-
-/** Reduce chord to root + 'm' if minor, else just root.
- *  Strips slash bass, extensions, and quality suffixes. */
-function normChord(chord: string): string {
-  const noSlash = chord.split('/')[0];
-  const m = noSlash.match(/^([A-G][#b]?)(.*)/);
-  if (!m) return '';
-  const [, root, quality] = m;
-  const isMinor = /^m(?!aj)/.test(quality);
-  return root + (isMinor ? 'm' : '');
-}
-
-function chordVariants(norm: string): string[] {
-  const isMinor = norm.endsWith('m');
-  const root = isMinor ? norm.slice(0, -1) : norm;
-  const suffix = isMinor ? 'm' : '';
-  const twin = ENH[root];
-  return twin ? [norm, twin + suffix] : [norm];
-}
-
-function keyFromChords(normChords: string[]): string {
-  if (!normChords.length) return "";
-  // Deduplicate preserving first-seen order
-  const unique = [...new Map(normChords.map(c => [c, c])).values()];
-  const first = unique[0];
-  let bestKey = "C", bestScore = -1;
-  for (const [key, diatonic] of Object.entries(DIATONIC_CHORDS)) {
-    const score = unique.filter(c => chordVariants(c).some(v => diatonic.has(v))).length;
-    if (score < bestScore) continue;
-    if (score > bestScore) { bestScore = score; bestKey = key; continue; }
-    // Tied — prefer key where first chord = tonic
-    const newTonic = chordVariants(first).some(v => v === key);
-    const curTonic = chordVariants(first).some(v => v === bestKey);
-    if (newTonic && !curTonic) bestKey = key;
-  }
-  return bestKey;
-}
-
-function detectKey(mdContent: string): string {
-  // Priority 1: explicit "Key: X" line anywhere in the file.
-  // Handles "Key: BCapo: 4th fret" (missing space before Capo).
-  const keyLineMatch = mdContent.match(/Key:\s*([A-G][#b]?)/);
-  if (keyLineMatch) return keyLineMatch[1];
-
-  // Priority 2: chord-quality diatonic matching over the whole chart.
-  const codeMatch = mdContent.match(/```\s*\n([\s\S]*?)```/);
-  const body = codeMatch ? codeMatch[1] : mdContent.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, "");
-  const normChords: string[] = [];
-  for (const line of body.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const tokens = trimmed.replace(/[|/\-.]/g, " ").split(/\s+/).filter(Boolean);
-    if (tokens.length > 0 && tokens.every(t => CHORD_TOKEN.test(t))) {
-      tokens.forEach(t => { const n = normChord(t); if (n) normChords.push(n); });
-    }
-  }
-  return keyFromChords(normChords);
-}
+// Sentinel used to join a slide's lyric lines into one exportable chart line
+// when a slide has 2 lines (Edit .pro mode). U+E000 (Private Use Area) never
+// appears in real lyric/chord text and — unlike U+2028/U+2029 — is NOT
+// treated as a line break by Python's str.splitlines(), so it survives the
+// splitlines() calls in ew_fetch.py/md_to_pro.py intact and lets md_to_pro.py
+// rebuild an explicit 2-line slide instead of splitting the lines into two
+// separate 1-line slides. Must match SLIDE_LINE_SEP in md_to_pro.py.
+const SLIDE_LINE_SEP = "\ue000";
 
 function parseSongMeta(mdContent: string): { title: string; artist: string } {
   const m = mdContent.match(/^title:\s*"([^"]+)"/m);
@@ -182,15 +99,9 @@ function normalizeChartHeaders(chart: string): string {
   }).join('\n');
 }
 
-// ── All keys ─────────────────────────────────────────────────────────────────
-const ALL_KEYS = [
-  "C","C#","Db","D","D#","Eb","E","F","F#","Gb","G","G#","Ab","A","A#","Bb","B",
-  "Cm","C#m","Dm","Ebm","Em","Fm","F#m","Gm","G#m","Am","Bbm","Bm"
-];
-
 // ── Types ─────────────────────────────────────────────────────────────────────
 type Status     = "idle" | "running" | "ok" | "err";
-type Mode       = "file" | "url";
+type Mode       = "file" | "url" | "pro";
 type OutputMode = "both" | "lyrics";
 
 interface AppConfig {
@@ -201,9 +112,17 @@ interface EwData {
   title: string;
   artist: string;
   key: string;
+  capo?: number;
   chart_text: string;
   lyrics_only?: boolean;
   error?: string;
+}
+
+interface ProSlide {
+  index: number;
+  group: string;
+  lines: string[];
+  chords: string;
 }
 
 // ── Preferences panel ─────────────────────────────────────────────────────────
@@ -347,6 +266,12 @@ export default function App() {
   const [outputMode, setOutputMode] = useState<OutputMode>("both");
   const [detectedKey, setDetectedKey] = useState("");
   const [targetKey, setTargetKey]     = useState("");
+  // Capo the SOURCE chart was written for. The chart is converted to concert
+  // pitch on load, so this is informational (and offered as an output capo).
+  const [sourceCapo, setSourceCapo]   = useState(0);
+  const [sourceShapes, setSourceShapes] = useState("");
+  // Capo for the OUTPUT: chords are written as shapes for (key − capo).
+  const [outputCapo, setOutputCapo]   = useState(0);
   const [outputDir, setOutputDir]     = useState("");
   const [status, setStatus]           = useState<Status>("idle");
   const [message, setMessage]         = useState("");
@@ -364,9 +289,26 @@ export default function App() {
   const [ewData, setEwData]         = useState<EwData | null>(null);
   const [editedChart, setEditedChart] = useState("");
 
+  // ── Pro edit mode state ────────────────────────────────────────
+  const [proPath, setProPath]     = useState("");
+  const [proTitle, setProTitle]   = useState("");
+  const [proSlides, setProSlides] = useState<ProSlide[]>([]);
+  const [proLoading, setProLoading] = useState(false);
+
   // ── Switch mode ────────────────────────────────────────────────
   const switchMode = useCallback((m: Mode) => {
     setMode(m); setStatus("idle"); setMessage("");
+  }, []);
+
+  // ── Shared: key/capo from a freshly loaded chart ───────────────
+  // Charts written for a capo are converted to concert pitch on load, so the
+  // preview, the Key picker, and what Python receives as --source-key all
+  // describe the same chords. Output capo starts at 0 (concert chords, which
+  // electric/keys need); the source capo is offered as a one-click option.
+  const applyKeyInfo = useCallback((info: ReturnType<typeof analyzeKey>) => {
+    setDetectedKey(info.concertKey); setTargetKey(info.concertKey);
+    setSourceCapo(info.capo); setSourceShapes(info.capo ? info.chartKey : "");
+    setOutputCapo(0);
   }, []);
 
   // ── File mode: load ────────────────────────────────────────────
@@ -377,41 +319,165 @@ export default function App() {
         const meta = parseSongMeta(content);
         setTitle(meta.title || path.split("/").pop()?.replace(/\.md$/, "") || "");
         setArtist(meta.artist);
-        const key = detectKey(content);
-        setDetectedKey(key); setTargetKey(key);
-        setFileChart(normalizeChartHeaders(extractChartBody(content)));
+        const body = extractChartBody(content);
+        const info = analyzeKey(content, body);
+        applyKeyInfo(info);
+        setFileChart(normalizeChartHeaders(toConcert(body, info)));
       })
       .catch(err => { setStatus("err"); setMessage(String(err)); });
+  }, [applyKeyInfo]);
+
+  // ── Pro edit mode: load .pro file ──────────────────────────────
+  const loadProFile = useCallback(async (path: string) => {
+    setProPath(path);
+    setProLoading(true);
+    setStatus("idle");
+    setMessage("");
+    setMode("pro");
+    try {
+      const jsonStr = await invoke<string>("parse_pro", { proPath: path });
+      const data = JSON.parse(jsonStr);
+      if (data.error) {
+        setStatus("err");
+        setMessage(`Parse error: ${data.error}`);
+        setProLoading(false);
+        return;
+      }
+      setProTitle(
+        data.title || path.split("/").pop()?.replace(/\.pro$/, "") || ""
+      );
+      // group + chords come straight from parse_pro.py — chords are
+      // pre-filled from whatever's already embedded on the source .pro so
+      // untouched slides keep their existing chords instead of losing them
+      // on export.
+      setProSlides(
+        (data.slides as { index: number; group: string; lines: string[]; chords: string }[]).map(s => ({
+          index: s.index,
+          group: s.group || "Slide",
+          lines: s.lines,
+          chords: s.chords || "",
+        }))
+      );
+    } catch (err) {
+      setStatus("err");
+      setMessage(String(err));
+    } finally {
+      setProLoading(false);
+    }
   }, []);
 
-  // Tauri file-drop events
+  // Tauri file-drop events — handles both .md and .pro
   useEffect(() => {
     const p1 = listen<string[]>("tauri://file-drop", e => {
-      const md = e.payload.find(f => f.endsWith(".md"));
-      if (md) { loadFile(md); setIsDragging(false); switchMode("file"); }
+      const pro = e.payload.find(f => f.endsWith(".pro"));
+      const md  = e.payload.find(f => f.endsWith(".md"));
+      setIsDragging(false);
+      if (pro) {
+        loadProFile(pro);
+      } else if (md) {
+        loadFile(md);
+        setMode("file");
+      }
     });
     const p2 = listen("tauri://file-drop-hover",     () => setIsDragging(true));
     const p3 = listen("tauri://file-drop-cancelled", () => setIsDragging(false));
     return () => { p1.then(f=>f()); p2.then(f=>f()); p3.then(f=>f()); };
-  }, [loadFile, switchMode]);
+  }, [loadFile, loadProFile]);
 
   const browseFile = useCallback(async () => {
     const sel = await open({ filters: [{ name: "Markdown", extensions: ["md"] }], multiple: false });
     if (typeof sel === "string") loadFile(sel);
   }, [loadFile]);
 
+  const browseProFile = useCallback(async () => {
+    const sel = await open({
+      filters: [{ name: "ProPresenter", extensions: ["pro"] }],
+      multiple: false,
+    });
+    if (typeof sel === "string") loadProFile(sel);
+  }, [loadProFile]);
+
   const clearFile = useCallback(() => {
     setMdPath(""); setTitle(""); setArtist(""); setFileChart("");
     setDetectedKey(""); setTargetKey("");
+    setSourceCapo(0); setSourceShapes(""); setOutputCapo(0);
+    setSourceCapo(0); setSourceShapes(""); setOutputCapo(0);
     setStatus("idle"); setMessage("");
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const clearPro = useCallback(() => {
+    setProPath(""); setProTitle(""); setProSlides([]);
+    setStatus("idle"); setMessage("");
   }, []);
 
   const clearUrl = useCallback(() => {
     setUrlInput(""); setEwData(null); setEditedChart("");
     setDetectedKey(""); setTargetKey("");
+    setSourceCapo(0); setSourceShapes(""); setOutputCapo(0);
     setStatus("idle"); setMessage("");
   }, []);
+
+  // ── Pro edit mode: update chords for a slide ───────────────────
+  const updateSlideChords = useCallback((index: number, chords: string) => {
+    setProSlides(prev =>
+      prev.map(s => s.index === index ? { ...s, chords } : s)
+    );
+  }, []);
+
+  // ── Pro edit mode: export to .pro ─────────────────────────────
+  const exportProChart = useCallback(async () => {
+    if (!proSlides.length) return;
+
+    // Build chord chart text.
+    // A [GroupName] section header is emitted only when the group changes
+    // from the previous slide, so consecutive slides that came from the same
+    // original group (Verse 1, Chorus, etc.) stay together as one group on
+    // export instead of every slide becoming its own "Slide N" group.
+    // Re-emitting the header when a group name repeats later in the song
+    // (e.g. a second "Chorus") correctly starts a new, separate group there
+    // too — matching how the original file was structured.
+    //
+    // Slides with 2 lyric lines are joined with SLIDE_LINE_SEP so md_to_pro.py
+    // reconstructs a single 2-line slide instead of splitting them into two
+    // separate 1-line slides (see matching constant there).
+    const chartLines: string[] = [];
+    let prevGroup: string | null = null;
+    for (const slide of proSlides) {
+      const groupName = slide.group || "Slide";
+      if (groupName !== prevGroup) {
+        chartLines.push(`[${groupName}]`);
+        prevGroup = groupName;
+      }
+      if (slide.chords.trim()) {
+        chartLines.push(slide.chords.trim());
+      }
+      if (slide.lines.length > 1) {
+        chartLines.push(slide.lines.join(SLIDE_LINE_SEP));
+      } else {
+        slide.lines.forEach(l => chartLines.push(l));
+      }
+      chartLines.push("");
+    }
+    const chartText = chartLines.join("\n").trimEnd();
+
+    setStatus("running"); setMessage("Generating…");
+    try {
+      const out = await invoke<string>("generate_from_url", {
+        title: proTitle,
+        artist: "",
+        chartText,
+        targetKey: null,
+        outputDir,
+        lyricsOnly: false,
+      });
+      setStatus("ok");
+      const match = out.match(/→\s+(.+\.pro)/);
+      setMessage(match ? `Saved: ${match[1]}` : (out.trim() || "Done!"));
+    } catch (err) {
+      setStatus("err"); setMessage(String(err));
+    }
+  }, [proSlides, proTitle, outputDir]);
 
   const generateFromFile = useCallback(async () => {
     if (!mdPath) return;
@@ -421,6 +487,8 @@ export default function App() {
         title, artist,
         chartText: fileChart,
         targetKey: targetKey || null,
+        sourceKey: detectedKey || null,
+        capo: outputMode === "lyrics" ? 0 : outputCapo,
         outputDir,
         lyricsOnly: outputMode === "lyrics",
       });
@@ -430,7 +498,7 @@ export default function App() {
     } catch (err) {
       setStatus("err"); setMessage(String(err));
     }
-  }, [mdPath, title, artist, fileChart, targetKey, outputDir, outputMode]);
+  }, [mdPath, title, artist, fileChart, targetKey, detectedKey, outputCapo, outputDir, outputMode]);
 
   // ── URL mode: fetch ────────────────────────────────────────────
   const fetchEW = useCallback(async () => {
@@ -443,11 +511,11 @@ export default function App() {
       if (data.error) {
         setStatus("err"); setMessage(`Fetch error: ${data.error}`);
       } else {
-        // Use key from site metadata if available; otherwise detect from chart.
-        const detectedFromChart = data.key ? "" : detectKey(data.chart_text || "");
-        const resolvedKey = data.key || detectedFromChart;
-        setEwData(data); setEditedChart(normalizeChartHeaders(data.chart_text || ""));
-        setDetectedKey(resolvedKey); setTargetKey(resolvedKey);
+        // Site key/capo win over what's written in the chart; chords fill in.
+        const chart = data.chart_text || "";
+        const info = analyzeKey(chart, chart, data.key || "", data.capo || 0);
+        setEwData(data); setEditedChart(normalizeChartHeaders(toConcert(chart, info)));
+        applyKeyInfo(info);
         setTitle(data.title || ""); setArtist(data.artist || "");
         if (data.lyrics_only) setOutputMode("lyrics");
       }
@@ -456,7 +524,7 @@ export default function App() {
     } finally {
       setIsFetching(false);
     }
-  }, [urlInput]);
+  }, [urlInput, applyKeyInfo]);
 
   const generateFromUrl = useCallback(async () => {
     if (!ewData) return;
@@ -465,6 +533,8 @@ export default function App() {
       const out = await invoke<string>("generate_from_url", {
         title: ewData.title, artist: ewData.artist,
         chartText: editedChart, targetKey: targetKey || null,
+        sourceKey: detectedKey || null,
+        capo: outputMode === "lyrics" ? 0 : outputCapo,
         outputDir, lyricsOnly: outputMode === "lyrics",
       });
       setStatus("ok");
@@ -473,7 +543,32 @@ export default function App() {
     } catch (err) {
       setStatus("err"); setMessage(String(err));
     }
-  }, [ewData, editedChart, targetKey, outputDir, outputMode]);
+  }, [ewData, editedChart, targetKey, detectedKey, outputCapo, outputDir, outputMode]);
+
+  // ── Shared: print chart (current key + capo, as the stage monitor shows) ─
+  const printChart = useCallback(async () => {
+    const chart = mode === "file" ? fileChart : editedChart;
+    if (!chart.trim()) return;
+    const key = targetKey || detectedKey;
+    const capo = outputMode === "lyrics" ? 0 : outputCapo;
+    let shapesKey = key, printed = chart;
+    try {
+      if (key && capo) shapesKey = shiftKey(key, -capo);
+      if (detectedKey && shapesKey) {
+        printed = transposeChart(chart, semitonesBetween(detectedKey, shapesKey), prefersFlats(shapesKey));
+      }
+    } catch { /* unknown key label — print the chart as-is */ }
+    const songTitle = mode === "file" ? title : (ewData?.title || "");
+    const songArtist = mode === "file" ? artist : (ewData?.artist || "");
+    try {
+      await invoke("open_print_view", {
+        title: `${songTitle || "Chart"}${key ? ` - ${key}` : ""}${capo ? ` (Capo ${capo})` : ""}`,
+        html: buildPrintHtml({ title: songTitle, artist: songArtist, key, capo, shapesKey, chart: printed }),
+      });
+    } catch (err) {
+      setStatus("err"); setMessage(`Print failed: ${err}`);
+    }
+  }, [mode, fileChart, editedChart, targetKey, detectedKey, outputCapo, outputMode, title, artist, ewData]);
 
   // ── Shared: output folder ──────────────────────────────────────
   const browseOutput = useCallback(async () => {
@@ -488,6 +583,15 @@ export default function App() {
   const canGenerate = hasOutputDir && (mode === "file"
     ? hasFile && Boolean(fileChart) && status !== "running"
     : Boolean(ewData) && !ewData?.error && status !== "running" && !isFetching);
+
+  const canPrint = Boolean((mode === "file" ? fileChart : editedChart).trim());
+
+  // Key of the chord shapes written out for the current key + capo.
+  let outputShapes = "";
+  try {
+    const k = targetKey || detectedKey;
+    if (k && outputCapo) outputShapes = shiftKey(k, -outputCapo);
+  } catch { /* unknown key label */ }
 
   const showSharedControls = (mode === "file" && hasFile) || Boolean(ewData && !ewData.error);
 
@@ -518,6 +622,9 @@ export default function App() {
         </button>
         <button className={`tab${mode === "url" ? " active" : ""}`} onClick={() => switchMode("url")}>
           🔗 URL
+        </button>
+        <button className={`tab${mode === "pro" ? " active" : ""}`} onClick={() => switchMode("pro")}>
+          ✏️ Edit .pro
         </button>
       </div>
 
@@ -608,6 +715,114 @@ export default function App() {
         </>
       )}
 
+      {/* ══ EDIT .pro MODE ═════════════════════════════════════════ */}
+      {mode === "pro" && (
+        <>
+          {/* Drop / browse zone */}
+          <div
+            className={`drop-zone${isDragging ? " dragging" : ""}${proPath ? " loaded" : ""}`}
+            onClick={!proPath ? browseProFile : undefined}
+          >
+            {proLoading ? (
+              <div className="drop-prompt">
+                <div className="drop-icon">⏳</div>
+                <div className="drop-label">Reading file…</div>
+                <div className="drop-sub">extracting slides from .pro</div>
+              </div>
+            ) : proPath ? (
+              <div className="file-card">
+                <div className="file-icon">🎼</div>
+                <div className="file-meta">
+                  <div className="file-song">{proTitle}</div>
+                  <div className="file-name">{proPath.split("/").pop()}</div>
+                </div>
+                <button
+                  className="clear-btn"
+                  title="Remove"
+                  onClick={e => { e.stopPropagation(); clearPro(); }}
+                >✕</button>
+              </div>
+            ) : (
+              <div className="drop-prompt">
+                <div className="drop-icon">{isDragging ? "⬇️" : "🎼"}</div>
+                <div className="drop-label">
+                  {isDragging ? "Drop to load" : "Drop a .pro file here"}
+                </div>
+                <div className="drop-sub">or click to browse — add or edit chords per slide</div>
+              </div>
+            )}
+          </div>
+
+          {/* Slide editor */}
+          {proSlides.length > 0 && (
+            <>
+              <div className="slide-list-header">
+                <span className="slide-list-count">{proSlides.length} slides</span>
+                <span className="slide-list-hint">Type chords above each lyric line</span>
+              </div>
+              <div className="slide-list">
+                {proSlides.map((slide, i) => (
+                  <div key={slide.index}>
+                    {(i === 0 || proSlides[i - 1].group !== slide.group) && (
+                      <div className="slide-group-header">{slide.group}</div>
+                    )}
+                    <div className="slide-card">
+                      <div className="slide-num">Slide {i + 1}</div>
+                      <div className="chord-row">
+                        <input
+                          className="chord-input"
+                          type="text"
+                          placeholder="A   E   F#m   D"
+                          value={slide.chords}
+                          onChange={e => updateSlideChords(slide.index, e.target.value)}
+                          spellCheck={false}
+                        />
+                      </div>
+                      <div className="lyric-lines">
+                        {slide.lines.map((line, j) => (
+                          <div className="lyric-line" key={j}>{line}</div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Output folder */}
+              <div className="field-row">
+                <label className="field-label">Output</label>
+                <div className="field-body output-body">
+                  <span className="output-path" title={outputDir}>
+                    {outputDir
+                      ? `…/${outputDir.split("/").slice(-2).join("/")}`
+                      : <span className="output-unset">Not set — open Preferences</span>}
+                  </span>
+                  <button className="change-btn" onClick={browseOutput}>Change…</button>
+                </div>
+              </div>
+
+              {!hasOutputDir && (
+                <p className="no-output-warning">
+                  ⚠️ No output folder set.{" "}
+                  <button className="link-btn" onClick={() => setShowPrefs(true)}>
+                    Open Preferences
+                  </button>{" "}
+                  to choose where .pro files are saved.
+                </p>
+              )}
+
+              <button
+                className={`generate-btn${(!hasOutputDir || status === "running") ? " disabled" : ""}`}
+                onClick={exportProChart}
+                disabled={!hasOutputDir || status === "running"}
+              >
+                {status === "running" ? "⏳  Generating…" : "Export .pro File →"}
+              </button>
+            </>
+          )}
+        </>
+      )}
+
       {/* ══ SHARED: KEY · SLIDES · OUTPUT · GENERATE ══════════════ */}
       {showSharedControls && (
         <>
@@ -621,15 +836,53 @@ export default function App() {
                 onChange={e => setTargetKey(e.target.value)}
               >
                 <option value="">-- auto-detect --</option>
-                {ALL_KEYS.map(k => <option key={k} value={k}>{k}</option>)}
+                <optgroup label="Major">
+                  {MAJOR_KEYS.map(k => <option key={k} value={k}>{k}</option>)}
+                </optgroup>
+                <optgroup label="Minor">
+                  {MINOR_KEYS.map(k => <option key={k} value={k}>{k}</option>)}
+                </optgroup>
               </select>
               {detectedKey && (
                 <span className="key-hint">
                   {targetKey && targetKey !== detectedKey
-                    ? <>detected <strong>{detectedKey}</strong> → transposing to <strong>{targetKey}</strong></>
-                    : <>detected: <strong>{detectedKey}</strong></>}
+                    ? <>original <strong>{detectedKey}</strong> → transposing to <strong>{targetKey}</strong></>
+                    : <>original key: <strong>{detectedKey}</strong></>}
                 </span>
               )}
+            </div>
+          </div>
+          {sourceCapo > 0 && (
+            <p className="capo-source-note">
+              Source chart was written for <strong>capo {sourceCapo}</strong> ({sourceShapes} shapes) —
+              converted to concert pitch (<strong>{detectedKey}</strong>) so electric and keys can read it.
+            </p>
+          )}
+
+          {/* Capo */}
+          <div className={`field-row${outputMode === "lyrics" ? " field-disabled" : ""}`}>
+            <label className="field-label">Capo</label>
+            <div className="field-body">
+              <select
+                className="key-select capo-select"
+                value={outputCapo}
+                onChange={e => setOutputCapo(Number(e.target.value))}
+                disabled={outputMode === "lyrics"}
+              >
+                <option value={0}>No capo</option>
+                {Array.from({ length: 9 }, (_, i) => i + 1).map(n => (
+                  <option key={n} value={n}>Capo {n}</option>
+                ))}
+              </select>
+              {outputCapo > 0 && outputShapes ? (
+                <span className="key-hint">
+                  chords shown as <strong>{outputShapes}</strong> shapes · first slide gets a capo note
+                </span>
+              ) : sourceCapo > 0 && outputMode !== "lyrics" ? (
+                <button className="link-btn" onClick={() => setOutputCapo(sourceCapo)}>
+                  Use original capo {sourceCapo}
+                </button>
+              ) : null}
             </div>
           </div>
 
@@ -681,14 +934,24 @@ export default function App() {
               to choose where .pro files are saved.
             </p>
           )}
-          <button
-            className={`generate-btn${!canGenerate ? " disabled" : ""}`}
-            onClick={mode === "file" ? generateFromFile : generateFromUrl}
-            disabled={!canGenerate}
-            title={!hasOutputDir ? "Set an output folder in Preferences first" : undefined}
-          >
-            {status === "running" ? "⏳  Generating…" : "Generate .pro File →"}
-          </button>
+          <div className="action-row">
+            <button
+              className={`generate-btn${!canGenerate ? " disabled" : ""}`}
+              onClick={mode === "file" ? generateFromFile : generateFromUrl}
+              disabled={!canGenerate}
+              title={!hasOutputDir ? "Set an output folder in Preferences first" : undefined}
+            >
+              {status === "running" ? "⏳  Generating…" : "Generate .pro File →"}
+            </button>
+            <button
+              className={`print-btn${!canPrint ? " disabled" : ""}`}
+              onClick={printChart}
+              disabled={!canPrint}
+              title="Print the chart in the selected key and capo for rehearsal"
+            >
+              🖨 Print
+            </button>
+          </div>
         </>
       )}
 

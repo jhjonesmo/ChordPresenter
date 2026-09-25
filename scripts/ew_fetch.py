@@ -460,14 +460,15 @@ def parse_echords(html: str) -> dict:
     if not title:
         h1_m = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.DOTALL)
         title = _strip_html(h1_m.group(1)).strip() if h1_m else ''
-    # Key often in "Capo on fret N" — we skip it (md_to_pro auto-detects from chords)
     key_m = re.search(r'[Tt]onality[^:]*:\s*([A-G][#b]?m?)', html)
     key   = key_m.group(1) if key_m else ''
+    capo_m = re.search(r'\bcapo\b[^0-9<]{0,20}(\d{1,2})', _strip_html(html), re.IGNORECASE)
+    capo   = int(capo_m.group(1)) if capo_m and 0 < int(capo_m.group(1)) < 12 else 0
 
     # Extract <pre> block
     pre_m = re.search(r'<pre[^>]*>(.*?)</pre>', html, re.DOTALL | re.IGNORECASE)
     if not pre_m:
-        return {'title': title, 'artist': artist, 'key': key, 'chart_text': ''}
+        return {'title': title, 'artist': artist, 'key': key, 'capo': capo, 'chart_text': ''}
     pre_content = pre_m.group(1)
 
     # Step 1: convert <i>Section:</i> to [SECTION]
@@ -501,6 +502,7 @@ def parse_echords(html: str) -> dict:
         'title':      title,
         'artist':     artist,
         'key':        key,
+        'capo':       capo,
         'chart_text': pre_content.strip(),
     }
 
@@ -624,10 +626,22 @@ def parse_ultimate_guitar(html: str) -> dict:
     except (KeyError, TypeError):
         pass
 
+    # Capo + key live in tab_view.meta (tab.capo doesn't exist — reading it
+    # there silently dropped every UG capo). UG's key is the CONCERT key; the
+    # chords are written as shapes for key − capo (e.g. key B, capo 4 → G).
+    meta = {}
+    try:
+        meta = data['store']['page']['data']['tab_view']['meta'] or {}
+    except (KeyError, TypeError):
+        pass
+
     title  = tab.get('song_name', '')
     artist = tab.get('artist_name', '')
-    key    = tab.get('tonality_name', '')
-    capo   = tab.get('capo', 0)
+    key    = meta.get('tonality') or tab.get('tonality_name', '')
+    try:
+        capo = int(meta.get('capo') or tab.get('capo') or 0)
+    except (TypeError, ValueError):
+        capo = 0
 
     # Find 'content' field (the chord chart)
     def find_content(obj, depth=0):
@@ -656,14 +670,11 @@ def parse_ultimate_guitar(html: str) -> dict:
     content = re.sub(r'\[/?tab\]', '', content)
     # [Verse 1], [Chorus] etc. are already in bracket format — leave them
 
-    # Add capo note if present
-    if capo and int(capo) > 0:
-        content = f'# Capo {capo}\n' + content
-
     return {
         'title':      title,
         'artist':     artist,
         'key':        key,
+        'capo':       capo if 0 < capo < 12 else 0,
         'chart_text': content.strip(),
     }
 
@@ -904,7 +915,8 @@ def parse_ew_page(html_content: str) -> dict:
 
 def generate_pro(title: str, artist: str, chart_text: str,
                  target_key: str | None, output_dir: str | None,
-                 lyrics_only: bool = False):
+                 lyrics_only: bool = False, source_key: str | None = None,
+                 capo: int = 0):
     """Write a temp MD file and call md_to_pro.py to generate the .pro file."""
     md_content = convert_chart_to_md(chart_text, title, artist)
 
@@ -917,6 +929,10 @@ def generate_pro(title: str, artist: str, chart_text: str,
         cmd = ['python3', script, tmp_path]
         if target_key and target_key.strip():
             cmd += ['--key', target_key.strip()]
+        if source_key and source_key.strip():
+            cmd += ['--source-key', source_key.strip()]
+        if capo:
+            cmd += ['--capo', str(capo)]
         if output_dir and output_dir.strip():
             cmd += ['--out', output_dir.strip()]
         if lyrics_only:
@@ -943,7 +959,10 @@ def main():
     ap.add_argument('--chart-file', help='Path to plain-text chart file (user-edited)')
     ap.add_argument('--title',      default='', help='Song title (for --chart-file mode)')
     ap.add_argument('--artist',     default='', help='Artist name (for --chart-file mode)')
-    ap.add_argument('--key',        help='Target key for transposition')
+    ap.add_argument('--key',        help='Target (concert) key for transposition')
+    ap.add_argument('--source-key', help='Key the chart\'s chord shapes are written in (skips detection)')
+    ap.add_argument('--capo',       type=int, default=0,
+                    help='Output capo: write chords as shapes for key − capo')
     ap.add_argument('--out',        help='Output directory for .pro file')
     ap.add_argument('--preview',     action='store_true',
                     help='Output JSON preview and exit (requires --url)')
@@ -983,8 +1002,17 @@ def main():
             sys.exit(1)
         # Lyrics-only sites always force lyrics_only mode
         effective_lyrics_only = lyrics_only or data.get('lyrics_only', False)
+        # Site says capo → its chart is shapes for key − capo, so hand the
+        # shapes key down; the key alone would be read as the shapes' key.
+        src_key = data.get('key') or None
+        site_capo = data.get('capo') or 0
+        if src_key and site_capo:
+            from md_to_pro import shift_key
+            src_key = shift_key(src_key, -site_capo)
         generate_pro(data['title'], data['artist'], data['chart_text'],
-                     args.key, args.out, lyrics_only=effective_lyrics_only)
+                     args.key or data.get('key') or None, args.out,
+                     lyrics_only=effective_lyrics_only,
+                     source_key=src_key, capo=args.capo)
         return
 
     # ── Mode 3: Generate from chart file (user-edited) ────────────
@@ -996,7 +1024,8 @@ def main():
             print(f'Could not read chart file: {e}', file=sys.stderr)
             sys.exit(1)
         generate_pro(args.title, args.artist, chart_text, args.key, args.out,
-                     lyrics_only=lyrics_only)
+                     lyrics_only=lyrics_only, source_key=args.source_key,
+                     capo=args.capo)
         return
 
     ap.print_help()

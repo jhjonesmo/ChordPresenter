@@ -14,7 +14,7 @@
   -webkit-font-smoothing: antialiased;
 }
 
-body { background: var(--bg); color: var(--text); }
+body { background: var(--bg); color: var(--text); overflow-y: auto; }
 
 /* ── Layout ── */
 .app {
@@ -195,6 +195,39 @@ body { background: var(--bg); color: var(--text); }
 .generate-btn:hover:not(.disabled) { opacity: 0.88; transform: translateY(-1px); }
 .generate-btn:active:not(.disabled) { transform: translateY(0); }
 .generate-btn.disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ── Generate + Print row ── */
+.action-row { display: flex; gap: 10px; align-items: stretch; }
+.action-row .generate-btn { flex: 1; width: auto; }
+.print-btn {
+  padding: 14px 18px;
+  margin-top: 4px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.2s, transform 0.1s;
+}
+.print-btn:hover:not(.disabled) { border-color: var(--accent2); transform: translateY(-1px); }
+.print-btn.disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ── Capo ── */
+.capo-select { width: 130px; }
+.field-row.field-disabled { opacity: 0.45; }
+.capo-source-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent2);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-left: 66px;
+}
+.capo-source-note strong { color: var(--text); }
 
 /* ── Output path unset warning ── */
 .output-unset { color: #b45309; font-style: italic; }
@@ -518,3 +551,139 @@ body { background: var(--bg); color: var(--text); }
   box-sizing: border-box;
 }
 .chart-textarea:focus { outline: none; border-color: var(--accent2); }
+
+/* ── Edit .pro mode ──────────────────────────────────────────────────────── */
+.slide-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: -6px;
+}
+.slide-list-count {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+}
+.slide-list-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.slide-group-header {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  padding: 10px 2px 2px;
+}
+.slide-group-header:first-child { padding-top: 0; }
+
+.slide-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 380px;
+  overflow-y: auto;
+  padding-right: 2px;
+  flex-shrink: 0;   /* don't let parent flex compress the list */
+  /* subtle scrollbar */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.slide-list::-webkit-scrollbar { width: 5px; }
+.slide-list::-webkit-scrollbar-track { background: transparent; }
+.slide-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+.slide-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  flex-shrink: 0;   /* cards must not compress */
+  transition: border-color 0.15s;
+}
+.slide-card:focus-within {
+  border-color: var(--accent2);
+}
+
+.slide-num {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  padding: 5px 12px 3px;
+}
+
+/* Chord line vs lyric line — the yellow band mirrors the chord line on the
+   ProPresenter stage monitor; the lyric line stays plain. Both rows share the
+   same monospace font, size, and left offset so a chord typed N spaces in
+   sits over the Nth lyric character (parse_pro.py positions them that way). */
+.slide-card {
+  --row-label-w: 50px;
+  --row-font: "SF Mono", "Fira Mono", "Menlo", monospace;
+}
+
+.chord-row {
+  position: relative;
+  background: #fef3c7;
+  border-top: 1px solid #fde68a;
+  border-bottom: 1px solid #fde68a;
+  border-left: 3px solid #eab308;
+  padding: 6px 10px 6px calc(10px + var(--row-label-w));
+  display: flex;
+  align-items: center;
+}
+.chord-row::before,
+.lyric-lines::before {
+  position: absolute;
+  left: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.chord-row::before   { content: "Chords"; color: #a16207; }
+.lyric-lines::before { content: "Lyrics"; color: var(--text-muted); top: 11px; }
+
+.chord-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  padding: 0;
+  font-family: var(--row-font);
+  font-size: 13px;
+  font-weight: 700;
+  color: #854d0e;
+  caret-color: #854d0e;
+  white-space: pre;
+  min-width: 0;
+}
+.chord-input::placeholder {
+  color: rgba(133, 77, 14, 0.35);
+  font-weight: 400;
+}
+
+.lyric-lines {
+  position: relative;
+  padding: 8px 10px 10px calc(10px + var(--row-label-w));
+  border-left: 3px solid transparent;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lyric-line {
+  font-family: var(--row-font);
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

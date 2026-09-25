@@ -47,6 +47,17 @@ INBOX_DIR = ""  # Set via --inbox flag or Preferences; do not hardcode
 # become normal slides.
 SKIP_SECTION_RE = re.compile(r'^tab$', re.IGNORECASE)
 
+# Sentinel marking an explicit 2-line slide (used by ChordPresenter's Edit .pro
+# mode when re-exporting an existing .pro's slides). U+E000 (Private Use Area)
+# never appears in real lyric/chord text and \u2014 unlike U+2028/U+2029 \u2014 is NOT
+# treated as a line boundary by str.splitlines(), so it survives intact
+# through chart_text.splitlines() in ew_fetch.py's convert_chart_to_md() and
+# body.splitlines() below. Any lyric line containing it is split back into
+# the two original lines and kept on ONE slide, instead of falling through to
+# the normal one-line-per-slide behaviour. Must match SLIDE_LINE_SEP in
+# src/App.tsx's exportProChart.
+SLIDE_LINE_SEP = '\ue000'
+
 # Whitelist of recognised section names — works for any capitalisation and with or
 # without a trailing colon (EssentialWorship, WorshipTogether, WorshipChords.com,
 # E-Chords, Ultimate Guitar, WorshipChords.net all produce variants of these).
@@ -419,6 +430,23 @@ def parse_md_song(filepath: str):
             chord_positions = _map_chord_positions(pending_chord_line, stripped)
             pending_chord_line = None
 
+        # ── Explicit 2-line slide sentinel (ChordPresenter Edit .pro mode) ──
+        # Bypasses the dash/comma heuristics below entirely — the two lines
+        # are already known-good and must land on the same slide untouched.
+        if SLIDE_LINE_SEP in stripped:
+            parts = [p.strip() for p in stripped.split(SLIDE_LINE_SEP) if p.strip()]
+            if len(parts) >= 2:
+                slide_entry = (parts[0], parts[1])
+            elif parts:
+                slide_entry = parts[0]
+            else:
+                continue
+            cur_lines.append(slide_entry)
+            cur_chords.append((slide_entry if isinstance(slide_entry, str)
+                               else f"{slide_entry[0]} {slide_entry[1]}",
+                               chord_positions))
+            continue
+
         # Normalize chord-alignment spaces (e.g. "gave   me   one  more   day" → clean)
         lyric_clean = re.sub(r'  +', ' ', stripped)
 
@@ -519,6 +547,29 @@ def _idx_note(idx: int, prefer_flat: bool) -> str:
         note = _SHARP_TO_FLAT.get(note, note)
     return note
 
+_KEY_RE = re.compile(r'^([A-G][#b]?)(m(?!aj))?')
+
+# Conventional spelling for each pitch class (used when a key is computed,
+# e.g. B with capo 4 → G shapes, rather than chosen by the user).
+_MAJOR_SPELLING = ['C','Db','D','Eb','E','F','F#','G','Ab','A','Bb','B']
+_MINOR_SPELLING = ['Cm','C#m','Dm','Ebm','Em','Fm','F#m','Gm','G#m','Am','Bbm','Bm']
+
+def _is_minor_key(key: str) -> bool:
+    m = _KEY_RE.match(key.strip())
+    return bool(m and m.group(2))
+
+def _key_idx(key: str) -> int:
+    """Pitch index of a key's RELATIVE MAJOR, so a major/minor pair that share
+    a key signature compare equal: C == Am, G == Em. Picking Am as the target
+    for a song detected in C is then a 0-semitone move, not +9 (C → A major)."""
+    idx = _note_idx(key)
+    return (idx + 3) % 12 if _is_minor_key(key) else idx
+
+def shift_key(key: str, semitones: int) -> str:
+    """Move a key label by N semitones, keeping its mode (G +4 → B, Em +4 → G#m)."""
+    idx = (_note_idx(key) + semitones) % 12
+    return (_MINOR_SPELLING if _is_minor_key(key) else _MAJOR_SPELLING)[idx]
+
 def transpose_chord(chord: str, semitones: int, prefer_flat: bool = False) -> str:
     """
     Transpose a chord name by the given number of semitones.
@@ -556,6 +607,41 @@ def transpose_chord_map(chord_map, semitones: int, prefer_flat: bool):
         result.append((sec_name, new_pairs))
     return result
 
+# "Key: Am", "Key: BCapo: 4th fret" (UG clip, no space) — keep the minor 'm'
+# but not the 'm' of 'maj'.
+_KEY_LINE_RE = re.compile(r'Key:\s*([A-G][#b]?)(m(?!aj))?')
+
+# "Capo: 4th fret", "Capo 4", "# Capo 4", "Capo on fret 2", "capo 3rd".
+_CAPO_RE = re.compile(r'capo\b\s*:?\s*(?:on\s+)?(?:fret\s*)?(\d{1,2})', re.IGNORECASE)
+
+def _detect_capo(text: str) -> int:
+    m = _CAPO_RE.search(text)
+    n = int(m.group(1)) if m else 0
+    return n if 0 < n < 12 else 0
+
+def _detect_chart_key(filepath: str) -> tuple:
+    """Return (chart_key, concert_key, capo) for a standalone .md file.
+
+    chart_key is the key the written chord SHAPES are in; concert_key is what
+    the song actually sounds in. They differ only when the chart says capo.
+    Sites (UG, Obsidian clips of UG) label the CONCERT key — "Key: B, Capo 4"
+    with G shapes — so the shapes are Key − capo. If the chords themselves
+    already look like the labelled key, the site labelled the shapes instead.
+    """
+    with open(filepath, 'r', encoding='utf-8') as f:
+        raw = f.read()
+    capo = _detect_capo(raw)
+    labelled = _KEY_LINE_RE.search(raw)
+    detected = _detect_key(filepath)
+    if not capo or not labelled or detected == 'Unknown':
+        return detected, (shift_key(detected, capo) if capo and detected != 'Unknown' else detected), capo
+    # _detect_key returned the label; compare with what the chords say.
+    code = re.search(r'```\s*\n(.*?)```', raw, re.DOTALL)
+    chord_key = _key_from_body(code.group(1) if code else _extract_raw_md_body(raw))
+    if chord_key != 'Unknown' and _key_idx(chord_key) == _key_idx(detected):
+        return detected, shift_key(detected, capo), capo
+    return shift_key(detected, -capo), detected, capo
+
 def _detect_key(filepath: str) -> str:
     """Return the original key of the chart.
 
@@ -574,15 +660,18 @@ def _detect_key(filepath: str) -> str:
         raw = f.read()
 
     # Priority 1: explicit Key: field.
-    key_match = re.search(r'Key:\s*([A-G][#b]?)', raw)
+    key_match = _KEY_LINE_RE.search(raw)
     if key_match:
-        return key_match.group(1)
+        return key_match.group(1) + (key_match.group(2) or '')
 
     # Get chart body.
     code = re.search(r'```\s*\n(.*?)```', raw, re.DOTALL)
     body = code.group(1) if code else _extract_raw_md_body(raw)
+    return _key_from_body(body)
 
-    # Priority 2: chord-quality diatonic matching over the whole chart.
+
+def _key_from_body(body: str) -> str:
+    """Chord-quality diatonic matching over the whole chart body."""
     norm_chords = []
     for line in body.splitlines():
         stripped = line.strip()
@@ -604,8 +693,14 @@ def _detect_key(filepath: str) -> str:
 # .PRO FILE BUILDER  (single output file with chords embedded)
 # ────────────────────────────────────────────────────────────────
 
+def capo_note(capo: int, concert_key: str, shapes_key: str) -> str:
+    """Stage-display note for the first slide when chords are capo shapes."""
+    return (f"CAPO {capo} - chords are {shapes_key} shapes (sounds in {concert_key}).\n"
+            f"No capo / electric / keys: play in {concert_key}.")
+
+
 def build_song_pro(title: str, artist: str, sections, chord_map,
-                   lyrics_only: bool = False):
+                   lyrics_only: bool = False, first_slide_notes: str | None = None):
     """
     Build a single .pro file with lyrics + optionally embedded chords.
     Automatically prepends 2 blank slides in an "Opening" group so the operator
@@ -631,8 +726,10 @@ def build_song_pro(title: str, artist: str, sections, chord_map,
             chord_dicts = [chords for _, chords in lyric_chord_pairs]
             chord_data.append((sec_name, chord_dicts))
 
+    # Notes go on the first Opening slide: stage display only, never audience.
+    slide_notes = {0: first_slide_notes} if first_slide_notes else None
     return build_pro_file(title, all_sections, arrangement_name="DoubleThickTheme",
-                          chord_data=chord_data)
+                          chord_data=chord_data, slide_notes=slide_notes)
 
 
 # ────────────────────────────────────────────────────────────────
@@ -646,27 +743,47 @@ def _safe_filename(name: str) -> str:
 
 
 def process_file(filepath: str, target_key: str = None, output_dir: str = None,
-                 lyrics_only: bool = False):
+                 lyrics_only: bool = False, source_key: str = None, capo: int = 0):
+    """
+    target_key : CONCERT key to output in (default: the song's concert key).
+    source_key : key the chart's chord shapes are written in. ChordPresenter
+                 always passes this (it has already converted capo charts to
+                 concert pitch), so detection here can't disagree with the UI.
+                 Omitted on the CLI → detected from the file, including any
+                 "Capo N" note.
+    capo       : output capo. Chords are written as shapes for (target − capo)
+                 and the first slide gets a stage-display note saying so.
+    """
     print(f"\nProcessing: {os.path.basename(filepath)}")
 
     title, artist, sections, chord_map = parse_md_song(filepath)
     display_name = _safe_filename(f"{title} - {artist}" if artist else title)
 
-    # Detect original key; optionally transpose to target key
-    source_key = _detect_key(filepath)
-    key = target_key if target_key else source_key
-
-    if target_key and target_key.upper() != source_key.upper():
-        try:
-            semitones = (_note_idx(target_key) - _note_idx(source_key)) % 12
-            prefer_flat = target_key in _FLAT_KEYS
-            chord_map = transpose_chord_map(chord_map, semitones, prefer_flat)
-            print(f"  Transposing: {source_key} → {target_key} ({semitones:+d} semitones)")
-        except ValueError as e:
-            print(f"  WARNING: Could not transpose ({e}); using original key {source_key}")
-            key = source_key
+    if source_key:
+        chart_key, concert_key, src_capo = source_key, source_key, 0
     else:
-        print(f"  Key: {key}")
+        chart_key, concert_key, src_capo = _detect_chart_key(filepath)
+        if src_capo:
+            print(f"  Source chart: capo {src_capo} ({chart_key} shapes, concert {concert_key})")
+
+    capo = capo if (capo and not lyrics_only and 0 < capo < 12) else 0
+    key = target_key or concert_key
+    shapes_key = key
+
+    try:
+        if capo:
+            shapes_key = shift_key(key, -capo)
+        semitones = (_key_idx(shapes_key) - _key_idx(chart_key)) % 12
+        if semitones:
+            prefer_flat = shapes_key in _FLAT_KEYS
+            chord_map = transpose_chord_map(chord_map, semitones, prefer_flat)
+            print(f"  Transposing: {chart_key} → {shapes_key} ({semitones:+d} semitones)")
+        print(f"  Key: {key}" + (f" (capo {capo}, {shapes_key} shapes)" if capo else ""))
+    except ValueError as e:
+        print(f"  WARNING: Could not transpose ({e}); using original key {chart_key}")
+        key, shapes_key, capo = chart_key, chart_key, 0
+
+    notes = capo_note(capo, key, shapes_key) if capo else None
 
     mode_tag = " [lyrics only]" if lyrics_only else ""
     print(f"  Title:  {title}{mode_tag}")
@@ -682,10 +799,11 @@ def process_file(filepath: str, target_key: str = None, output_dir: str = None,
     os.makedirs(out_dir, exist_ok=True)
 
     # Single output file: "Title - Artist - Key.pro"  (or "Title - Key.pro" if no artist)
-    file_name   = f"{display_name} - {key}.pro"
+    capo_tag    = f" (Capo {capo})" if capo else ""
+    file_name   = f"{display_name} - {key}{capo_tag}.pro"
     file_path   = os.path.join(out_dir, file_name)
     song_data   = build_song_pro(display_name, artist, sections, chord_map,
-                                  lyrics_only=lyrics_only)
+                                  lyrics_only=lyrics_only, first_slide_notes=notes)
 
     with open(file_path, 'wb') as f:
         f.write(song_data)
@@ -700,6 +818,8 @@ def main():
 
     # Parse optional --key TARGET, --out DIR, --lyrics-only flags
     target_key  = None
+    source_key  = None
+    capo        = 0
     output_dir  = None
     lyrics_only = False
     filtered = []
@@ -707,6 +827,10 @@ def main():
     while i < len(args):
         if args[i] == '--key' and i + 1 < len(args):
             target_key = args[i + 1]; i += 2
+        elif args[i] == '--source-key' and i + 1 < len(args):
+            source_key = args[i + 1]; i += 2
+        elif args[i] == '--capo' and i + 1 < len(args):
+            capo = int(args[i + 1]); i += 2
         elif args[i] == '--out' and i + 1 < len(args):
             output_dir = args[i + 1]; i += 2
         elif args[i] == '--lyrics-only':
@@ -733,17 +857,18 @@ def main():
         for fp in sorted(md_files):
             try:
                 process_file(fp, target_key=target_key, output_dir=output_dir,
-                             lyrics_only=lyrics_only)
+                             lyrics_only=lyrics_only, capo=capo)
             except Exception as e:
                 print(f"  ERROR: {e}")
     elif args:
         for fp in args:
             process_file(fp, target_key=target_key, output_dir=output_dir,
-                         lyrics_only=lyrics_only)
+                         lyrics_only=lyrics_only, source_key=source_key, capo=capo)
     else:
         print("Usage:")
         print("  python3 md_to_pro.py 'path/to/song.md'")
         print("  python3 md_to_pro.py 'path/to/song.md' --key G")
+        print("  python3 md_to_pro.py 'path/to/song.md' --key B --capo 4   (G shapes)")
         print("  python3 md_to_pro.py --all")
         print("  python3 md_to_pro.py --all --key Bb --out /path/to/output")
         sys.exit(1)

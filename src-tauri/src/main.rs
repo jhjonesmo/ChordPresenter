@@ -238,6 +238,8 @@ fn generate_from_url(
     artist: String,
     chart_text: String,
     target_key: Option<String>,
+    source_key: Option<String>,
+    capo: Option<u8>,
     output_dir: String,
     lyrics_only: Option<bool>,
 ) -> Result<String, String> {
@@ -262,6 +264,13 @@ fn generate_from_url(
         let k = key.trim();
         if !k.is_empty() { cmd.arg("--key").arg(k); }
     }
+    if let Some(ref key) = source_key {
+        let k = key.trim();
+        if !k.is_empty() { cmd.arg("--source-key").arg(k); }
+    }
+    if let Some(c) = capo {
+        if c > 0 && c < 12 { cmd.arg("--capo").arg(c.to_string()); }
+    }
     if !output_dir.trim().is_empty() {
         cmd.arg("--out").arg(output_dir.trim());
     }
@@ -272,6 +281,45 @@ fn generate_from_url(
     let result = run_python(&app, cmd, "generate_from_url");
     let _ = std::fs::remove_file(&tmp_path);
     result
+}
+
+/// Write a printable chart to a temp HTML file and open it in the default
+/// browser, which auto-opens its print dialog (WKWebView in Tauri 1 has no
+/// working window.print()). Print → "Save as PDF" also works from there.
+#[tauri::command]
+fn open_print_view(app: tauri::AppHandle, title: String, html: String) -> Result<(), String> {
+    let dir = std::env::temp_dir().join("ChordPresenter-print");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Could not create print folder: {}", e))?;
+    let safe: String = title
+        .chars()
+        .map(|c| if c.is_alphanumeric() || " -_()#".contains(c) { c } else { '-' })
+        .collect();
+    let name = if safe.trim().is_empty() { "Chart".to_string() } else { safe.trim().to_string() };
+    let path = dir.join(format!("{}.html", name));
+    std::fs::write(&path, html).map_err(|e| format!("Could not write print file: {}", e))?;
+    log(&app, "print", &format!("Opening print view: {}", path.display()));
+    Command::new("open")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("Could not open print view: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn parse_pro(app: tauri::AppHandle, pro_path: String) -> Result<String, String> {
+    let p = std::path::Path::new(&pro_path);
+    if !p.is_absolute() {
+        return Err("Path must be absolute".into());
+    }
+    let canonical = p.canonicalize().map_err(|e| format!("Invalid path: {}", e))?;
+    if !canonical.exists() {
+        return Err(format!("File not found: {}", pro_path));
+    }
+    let script = script_path(&app, "parse_pro.py")?;
+    let mut cmd = Command::new("python3");
+    cmd.arg(&script).arg(canonical.to_string_lossy().to_string());
+    run_python(&app, cmd, "parse_pro")
+        .map(|s| s.trim().to_string())
 }
 
 // ── Menu ──────────────────────────────────────────────────────────────────────
@@ -342,6 +390,8 @@ fn main() {
             read_file,
             fetch_ew_preview,
             generate_from_url,
+            parse_pro,
+            open_print_view,
             get_config,
             save_config,
             get_log_path,

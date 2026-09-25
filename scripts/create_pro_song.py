@@ -207,10 +207,52 @@ def _build_chord_attr_bytes(chord_positions):
     return result
 
 
-def build_slide(line1, line2=None, chord_positions=None):
+# Slide notes (PresentationSlide.notes, field 2) — shown on any stage layout
+# that includes a "Slide Notes" object, never on the audience output.
+# Layout matches notes written by ProPresenter itself:
+#   PresentationSlide { base_slide=1, notes=2 { rtf_data=1, attributes=2 }, transition=4 }
+# The template has no notes, so they're inserted right before its trailing
+# transition (f4 "22 02 18 01") + Cue field 12 ("60 01") = the last 6 bytes.
+_NOTES_TAIL_LEN = 6
+# Varints of the containers that enclose PresentationSlide (Cue f10 action,
+# Action f23 slide type, SlideType f2 presentation slide). All sit before the
+# Attributes/RTF regions, so earlier edits never shift them.
+NOTES_VARINT_POSITIONS = VARINT_POSITIONS[:3]
+
+_NOTES_RTF_HEADER = (
+    '{\\rtf1\\ansi\\ansicpg1252\\cocoartf2870\n'
+    '\\cocoatextscaling0\\cocoaplatform0{\\fonttbl\\f0\\fswiss\\fcharset0 Helvetica;}\n'
+    '{\\colortbl;\\red255\\green255\\blue255;}\n'
+    '{\\*\\expandedcolortbl;;}\n'
+    '\\pard\\pardirnatural\\partightenfactor0\n\n'
+    '\\f0\\fs48 \\cf1 '
+)
+
+
+def _rtf_escape(text):
+    out = []
+    for ch in text:
+        if ch in '\\{}':
+            out.append('\\' + ch)
+        elif ch == '\n':
+            out.append('\\\n')
+        elif ord(ch) > 127:
+            out.append(f'\\u{ord(ch) if ord(ch) < 32768 else ord(ch) - 65536}?')
+        else:
+            out.append(ch)
+    return ''.join(out)
+
+
+def _build_notes_bytes(text):
+    rtf = (_NOTES_RTF_HEADER + _rtf_escape(text) + '}').encode('latin-1')
+    return encode_lv(2, encode_lv(1, rtf) + encode_lv(2, b''))
+
+
+def build_slide(line1, line2=None, chord_positions=None, notes=None):
     """
     Build a binary slide blob for one or two lyric lines.
     chord_positions : optional dict {char_pos: chord_name} for Vocals+Chords version.
+    notes           : optional slide-notes text (stage display only).
     Returns (slide_bytes, slide_uuid_str).
     """
     new_slide_uid  = new_uuid().encode('ascii')
@@ -268,6 +310,17 @@ def build_slide(line1, line2=None, chord_positions=None):
             while len(new_bytes) < (actual_vend - actual_vpos):
                 new_bytes = new_bytes[:-1] + bytes([new_bytes[-1] | 0x80, 0x00])
             sb[actual_vpos:actual_vend] = new_bytes[: actual_vend - actual_vpos]
+
+    if notes:
+        notes_bytes = _build_notes_bytes(notes)
+        at = len(sb) - _NOTES_TAIL_LEN
+        sb = bytearray(bytes(sb[:at]) + notes_bytes + bytes(sb[at:]))
+        for vpos, vend in NOTES_VARINT_POSITIONS:
+            old_val, _ = decode_varint(sb, vpos)
+            new_bytes  = encode_varint(old_val + len(notes_bytes))
+            while len(new_bytes) < (vend - vpos):
+                new_bytes = new_bytes[:-1] + bytes([new_bytes[-1] | 0x80, 0x00])
+            sb[vpos:vend] = new_bytes[: vend - vpos]
 
     return bytes(sb), new_slide_uid.decode('ascii')
 
@@ -338,7 +391,8 @@ def lines_to_slides(lines):
     return slides
 
 
-def build_pro_file(title, sections, arrangement_name="DoubleThickTheme", chord_data=None):
+def build_pro_file(title, sections, arrangement_name="DoubleThickTheme", chord_data=None,
+                   slide_notes=None):
     """
     Build the complete binary content of a .pro file.
 
@@ -349,6 +403,7 @@ def build_pro_file(title, sections, arrangement_name="DoubleThickTheme", chord_d
     chord_data   : optional list parallel to sections:
                    [(section_name, [{char_pos: chord_name}, …]), …]
                    One chord dict per slide; pass None or {} for slides with no chords.
+    slide_notes  : optional {slide_index: notes_text}, indexed across all sections.
     """
     song_uuid = new_uuid()
     arr_uuid  = new_uuid()
@@ -377,7 +432,9 @@ def build_pro_file(title, sections, arrangement_name="DoubleThickTheme", chord_d
         slide_uuids = []
         for line1, line2 in lines_to_slides(lyric_lines):
             chord_pos = chord_lookup[slide_index] if chord_lookup else None
-            slide_bytes, slide_uid = build_slide(line1, line2, chord_positions=chord_pos)
+            notes = slide_notes.get(slide_index) if slide_notes else None
+            slide_bytes, slide_uid = build_slide(line1, line2, chord_positions=chord_pos,
+                                                 notes=notes)
             slide_uuids.append(slide_uid)
             all_slides[slide_uid] = slide_bytes
             slide_index += 1
